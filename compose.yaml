@@ -1,0 +1,47 @@
+name: notebookllama-enhanced
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - 16686:16686
+      - 4317:4317
+      - 4318:4318
+      - 9411:9411
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+
+  postgres:
+    image: pgvector/pgvector:pg15
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_DB: ${pgql_db:-notebookllama_enhanced}
+      POSTGRES_USER: ${pgql_user:-postgres}
+      POSTGRES_PASSWORD: ${pgql_psw:-admin}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    command: >
+      postgres
+      -c shared_preload_libraries=vector
+      -c 'vector.enable_prefilter=on'
+
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+volumes:
+  pgdata:
+  redis_data:
