@@ -32,7 +32,7 @@ from llama_index.core import Document, VectorStoreIndex, Settings
 from llama_index.core.schema import TextNode, NodeWithScore
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
-from llama_index.vector_stores.postgres.base import PGVectorStore 
+from llama_index.vector_stores.postgres import PGVectorStore 
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import CitationQueryEngine
 from llama_index.core.response import Response
@@ -211,10 +211,11 @@ class PostgreSQLDocumentManager:
             
             if self.embedding_model:
                 try:
-                    # Generate embeddings synchronously to avoid async issues
-                    content_embedding = self.embedding_model.get_text_embedding(document.content)
+                    # Only generate summary embedding here (content will be chunked later)
+                    # Don't embed full content as it may exceed token limits
+                    content_embedding = None  # Will be handled by chunks in _add_to_vector_store
                     summary_embedding = self.embedding_model.get_text_embedding(document.summary)
-                    print(f"Generated embeddings: content={len(content_embedding)}, summary={len(summary_embedding)}")
+                    print(f"Generated summary embedding: {len(summary_embedding) if summary_embedding else 0} dimensions")
                 except Exception as e:
                     print(f"Warning: Could not generate embeddings: {e}")
                     content_embedding = None
@@ -298,53 +299,99 @@ class PostgreSQLDocumentManager:
         """Add document to vector store for semantic search"""
         if not self.vector_store:
             return
-            
+
         try:
             # Create LlamaIndex documents with embeddings
             doc_nodes = []
-            
-            # Generate embeddings for content and summary
-            content_embedding = None
-            summary_embedding = None
-            
-            if self.embedding_model:
-                try:
-                    content_embedding = self.embedding_model.get_text_embedding(document.content)
-                    summary_embedding = self.embedding_model.get_text_embedding(document.summary)
-                except Exception as e:
-                    print(f"Warning: Could not generate embeddings for vector store: {e}")
-                    return  # Can't add to vector store without embeddings
-            
-            # Main content with embedding
-            content_node = TextNode(
-                text=document.content,
-                embedding=content_embedding,  # Set the embedding directly
-                doc_metadata={
-                    "document_id": document.id,
-                    "document_name": document.document_name,
-                    "type": "content",
-                    "created_at": document.created_at.isoformat() if document.created_at else None
-                }
-            )
-            doc_nodes.append(content_node)
-            
-            # Summary as separate node with embedding
-            summary_node = TextNode(
-                text=document.summary,
-                embedding=summary_embedding,  # Set the embedding directly
-                doc_metadata={
-                    "document_id": document.id,
-                    "document_name": document.document_name,
-                    "type": "summary",
-                    "created_at": document.created_at.isoformat() if document.created_at else None
-                }
-            )
-            doc_nodes.append(summary_node)
+
+            # Chunk the content to avoid token limits (8192 max for embeddings)
+            max_chunk_size = 3000  # Conservative size to stay well under 8192 token limit
+            content_chunks = []
+
+            # Split content into chunks
+            words = document.content.split()
+            current_chunk = []
+            current_size = 0
+
+            for word in words:
+                current_chunk.append(word)
+                current_size += len(word) + 1  # +1 for space
+
+                if current_size >= max_chunk_size:
+                    chunk_text = ' '.join(current_chunk)
+                    content_chunks.append(chunk_text)
+                    current_chunk = []
+                    current_size = 0
+
+            # Add remaining words
+            if current_chunk:
+                chunk_text = ' '.join(current_chunk)
+                content_chunks.append(chunk_text)
+
+            print(f"Splitting document into {len(content_chunks)} chunks for embedding")
+            print(f"First chunk preview: {content_chunks[0][:200]}..." if content_chunks else "No chunks created")
+
+            # Process each chunk
+            for i, chunk_text in enumerate(content_chunks):
+                chunk_embedding = None
+
+                if self.embedding_model:
+                    try:
+                        chunk_embedding = self.embedding_model.get_text_embedding(chunk_text)
+                    except Exception as e:
+                        print(f"Warning: Could not generate embedding for chunk {i+1}: {e}")
+                        continue  # Skip this chunk but continue with others
+
+                # Create node for this chunk
+                chunk_node = TextNode(
+                    text=chunk_text,
+                    embedding=chunk_embedding,
+                    doc_metadata={
+                        "document_id": document.id,
+                        "document_name": document.document_name,
+                        "type": "content",
+                        "chunk_index": i,
+                        "total_chunks": len(content_chunks),
+                        "created_at": document.created_at.isoformat() if document.created_at else None
+                    }
+                )
+                doc_nodes.append(chunk_node)
+
+            # Also add summary as a separate node
+            if document.summary:
+                summary_embedding = None
+                if self.embedding_model:
+                    try:
+                        summary_embedding = self.embedding_model.get_text_embedding(document.summary)
+                    except Exception as e:
+                        print(f"Warning: Could not generate summary embedding: {e}")
+
+                # Summary as separate node with embedding
+                summary_node = TextNode(
+                    text=document.summary,
+                    embedding=summary_embedding,  # Set the embedding directly
+                    doc_metadata={
+                        "document_id": document.id,
+                        "document_name": document.document_name,
+                        "type": "summary",
+                        "created_at": document.created_at.isoformat() if document.created_at else None
+                    }
+                )
+                doc_nodes.append(summary_node)
             
             # Add nodes to vector store
             self.vector_store.add(doc_nodes)
             print(f"Successfully added {len(doc_nodes)} nodes to vector store")
-            
+
+            # Refresh the vector index to make new documents searchable
+            if self.vector_index:
+                # Recreate the index to ensure new documents are searchable
+                from llama_index.core import VectorStoreIndex
+                self.vector_index = VectorStoreIndex.from_vector_store(
+                    vector_store=self.vector_store
+                )
+                print("Vector index refreshed with new documents")
+
         except Exception as e:
             print(f"Warning: Could not add to vector store: {e}")
 
@@ -418,7 +465,7 @@ class PostgreSQLDocumentManager:
             
             results = []
             for record in records:
-                if record.content_embedding:
+                if record.content_embedding is not None and len(record.content_embedding) > 0:
                     # Calculate similarity (simplified)
                     similarity = self._calculate_similarity(query_embedding, record.content_embedding)
                     if similarity >= similarity_threshold:

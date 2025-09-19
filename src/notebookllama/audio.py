@@ -261,6 +261,22 @@ class PodcastGenerator(BaseModel):
     ) -> str:
         """Generate speech file for a single turn"""
         try:
+            logger.info(f"Generating speech for: {text[:100]}... (voice_id: {voice_id})")
+
+            # Test API connection first
+            try:
+                # Check if the voice exists
+                voices = await self.client.voices.get_all()
+                available_voice_ids = [voice.voice_id for voice in voices.voices] if hasattr(voices, 'voices') else []
+                logger.info(f"Available voices: {len(available_voice_ids)} found")
+
+                if voice_id not in available_voice_ids and available_voice_ids:
+                    logger.warning(f"Voice ID {voice_id} not found, using first available: {available_voice_ids[0]}")
+                    voice_id = available_voice_ids[0]
+
+            except Exception as voice_error:
+                logger.warning(f"Could not verify voice ID: {voice_error}")
+
             speech_iterator = self.client.text_to_speech.convert(
                 voice_id=voice_id,
                 text=text,
@@ -269,17 +285,26 @@ class PodcastGenerator(BaseModel):
             )
 
             temp_file = temp.NamedTemporaryFile(
-                suffix=".mp3", delete=False, delete_on_close=False
+                suffix=".mp3", delete=False
             )
 
+            logger.info(f"Writing audio to temporary file: {temp_file.name}")
+            chunk_count = 0
             with open(temp_file.name, "wb") as f:
                 async for chunk in speech_iterator:
                     if chunk:
                         f.write(chunk)
+                        chunk_count += 1
 
+            logger.info(f"Successfully generated speech file with {chunk_count} chunks")
             return temp_file.name
+
         except Exception as e:
             logger.error(f"Failed to generate speech for text: {text[:50]}")
+            logger.error(f"Detailed error: {str(e)}")
+            logger.error(f"Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise AudioGenerationError(
                 f"Failed to generate speech for text: {text[:50]}"
             ) from e
@@ -307,18 +332,49 @@ class PodcastGenerator(BaseModel):
 
                 logger.info("Combining audio files...")
                 output_path = f"conversation_{str(uuid.uuid4())}.mp3"
-                combined_audio: AudioSegment = AudioSegment.empty()
 
-                for file_path in files:
-                    audio = AudioSegment.from_file(file_path)
-                    combined_audio += audio
+                try:
+                    # Try combining with pydub (requires ffmpeg)
+                    logger.info("Attempting to combine audio files with pydub...")
+                    combined_audio: AudioSegment = AudioSegment.empty()
 
-                combined_audio.export(
-                    output_path,
-                    format="mp3",
-                    bitrate=config.audio_quality.bitrate,
-                    parameters=config.audio_quality.quality_params,
-                )
+                    for file_path in files:
+                        logger.info(f"Loading audio file: {file_path}")
+                        audio = AudioSegment.from_file(file_path)
+                        combined_audio += audio
+                        logger.info(f"Added audio segment, total length: {len(combined_audio)}ms")
+
+                    logger.info(f"Exporting combined audio to: {output_path}")
+                    combined_audio.export(
+                        output_path,
+                        format="mp3",
+                        bitrate=config.audio_quality.bitrate,
+                        parameters=config.audio_quality.quality_params,
+                    )
+                    logger.info("Audio export completed successfully")
+
+                except Exception as export_error:
+                    logger.error(f"Audio combining/export failed: {export_error}")
+                    logger.info("Attempting manual binary concatenation as fallback...")
+
+                    # Fallback: Manual concatenation for MP3 files
+                    try:
+                        with open(output_path, 'wb') as outfile:
+                            for file_path in files:
+                                with open(file_path, 'rb') as infile:
+                                    outfile.write(infile.read())
+                        logger.info("Manual concatenation completed successfully")
+
+                    except Exception as concat_error:
+                        logger.error(f"Manual concatenation also failed: {concat_error}")
+
+                        # Final fallback: return the first audio file
+                        if files:
+                            logger.info("Using first audio file as final fallback")
+                            import shutil
+                            shutil.copy2(files[0], output_path)
+                        else:
+                            raise AudioGenerationError("All audio combining methods failed")
 
                 logger.info(f"Successfully created podcast audio: {output_path}")
                 return output_path
@@ -362,16 +418,37 @@ load_dotenv()
 
 PODCAST_GEN: Optional[PodcastGenerator]
 
-if os.getenv("ELEVENLABS_API_KEY", None) and os.getenv("OPENAI_API_KEY", None):
+elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", None)
+openai_key = os.getenv("OPENAI_API_KEY", None)
+
+logger.info(f"ElevenLabs API key present: {bool(elevenlabs_key)}")
+logger.info(f"OpenAI API key present: {bool(openai_key)}")
+
+if elevenlabs_key and openai_key:
     try:
+        logger.info("Initializing podcast generator components...")
+
         SLLM = OpenAI(
-            model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY")
+            model="gpt-4o", api_key=openai_key
         ).as_structured_llm(MultiTurnConversation)
-        EL_CLIENT = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+        logger.info("OpenAI structured LLM initialized successfully")
+
+        EL_CLIENT = AsyncElevenLabs(api_key=elevenlabs_key)
+        logger.info("ElevenLabs async client initialized successfully")
+
         PODCAST_GEN = PodcastGenerator(llm=SLLM, client=EL_CLIENT)
+        logger.info("Podcast generator initialized successfully")
+
     except Exception as e:
-        logger.warning(f"Could not initialize podcast generator: {e}")
+        logger.error(f"Could not initialize podcast generator: {e}")
+        import traceback
+        logger.error(f"Initialization traceback: {traceback.format_exc()}")
         PODCAST_GEN = None
 else:
-    logger.warning("Missing API keys - PODCAST_GEN not initialized")
+    missing_keys = []
+    if not elevenlabs_key:
+        missing_keys.append("ELEVENLABS_API_KEY")
+    if not openai_key:
+        missing_keys.append("OPENAI_API_KEY")
+    logger.warning(f"Missing API keys: {', '.join(missing_keys)} - PODCAST_GEN not initialized")
     PODCAST_GEN = None

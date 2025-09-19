@@ -24,6 +24,76 @@ class EnhancedQueryEngine:
     def __init__(self):
         self.document_manager = DOCUMENT_MANAGER
     
+    def query_index_sync(self, question: str) -> Union[str, None]:
+        """
+        Synchronous wrapper for query_index that avoids async conflicts
+        """
+        print(f"Starting query for: {question}")
+
+        try:
+            # Direct synchronous query using the vector index's query engine
+            if self.document_manager.vector_index:
+                print("Using vector index for search...")
+
+                # Create a comprehensive query engine from the index with better response generation
+                from llama_index.core.prompts import PromptTemplate
+
+                # Custom prompt template for more comprehensive responses
+                qa_template = PromptTemplate(
+                    "Context information is below.\n"
+                    "---------------------\n"
+                    "{context_str}\n"
+                    "---------------------\n"
+                    "Given the context information and not prior knowledge, "
+                    "answer the question in detail. Provide a comprehensive response "
+                    "that thoroughly addresses the question using the available information. "
+                    "Include specific details, examples, and explanations from the context.\n"
+                    "Question: {query_str}\n"
+                    "Answer: "
+                )
+
+                query_engine = self.document_manager.vector_index.as_query_engine(
+                    similarity_top_k=10,  # Get more relevant chunks
+                    response_mode="compact",  # Use compact mode for more detailed responses
+                    verbose=True,  # Enable verbose output for debugging
+                    text_qa_template=qa_template  # Use custom prompt for detailed responses
+                )
+
+                # Execute the query synchronously
+                response = query_engine.query(question)
+
+                if response and response.response:
+                    print(f"Vector search found response: {len(str(response.response))} characters")
+                    print(f"DEBUG: Response content: {str(response.response)[:500]}")
+                    print(f"DEBUG: Number of source nodes: {len(response.source_nodes) if response.source_nodes else 0}")
+
+                    # Format the response with sources
+                    formatted_response = f"{response.response}\n\n"
+
+                    if response.source_nodes:
+                        formatted_response += "\n\n**Sources:**\n"
+                        for i, node in enumerate(response.source_nodes[:3]):  # Limit to top 3 sources
+                            print(f"DEBUG: Source {i+1} preview: {node.text[:200]}")
+                            # Show more context from sources
+                            source_text = node.text[:300].strip()
+                            if len(node.text) > 300:
+                                source_text += "..."
+                            formatted_response += f"{i+1}. {source_text}\n\n"
+
+                    return formatted_response
+                else:
+                    print("Vector search returned no results")
+                    return "I couldn't find relevant information in the document to answer your question."
+            else:
+                print("Vector index not available")
+                return "The document index is not available. Please ensure a document has been processed."
+
+        except Exception as e:
+            print(f"Error in query_index_sync: {e}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
+            return f"I encountered an error while searching: {str(e)}"
+
     async def query_index(self, question: str) -> Union[str, None]:
         """
         Query the document index using vector search
