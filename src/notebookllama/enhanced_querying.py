@@ -7,7 +7,11 @@ import os
 from typing import Union, Optional
 from dotenv import load_dotenv
 
-from postgres_manager import DOCUMENT_MANAGER
+try:
+    from .postgres_manager import DOCUMENT_MANAGER
+except ImportError:
+    # Fallback for when module is imported directly
+    from postgres_manager import DOCUMENT_MANAGER
 
 load_dotenv()
 
@@ -30,21 +34,33 @@ class EnhancedQueryEngine:
         Returns:
             Formatted response with sources or None if no answer found
         """
+        print(f"Starting query for: {question}")
+        
         try:
             # First, try using the vector index if available
             if self.document_manager.vector_index:
+                print("Using vector index for search...")
                 response = await self.document_manager.query_documents(question)
                 if response:
+                    print(f"Vector search found response: {len(response)} characters")
                     return response
+                else:
+                    print("Vector search returned no results")
+            else:
+                print("Vector index not available - falling back to direct search")
             
             # Fallback to semantic search
+            print("Trying semantic search fallback...")
             search_results = await self.document_manager.search_documents(
                 query=question,
                 limit=5,
-                similarity_threshold=0.6
+                similarity_threshold=0.5  # Lower threshold for better recall
             )
             
+            print(f"Found {len(search_results)} semantic search results")
+            
             if not search_results:
+                print("No semantic search results found")
                 return None
             
             # Build response from search results
@@ -52,16 +68,24 @@ class EnhancedQueryEngine:
             sources = []
             
             for doc, similarity in search_results:
-                # Add relevant content based on the question
-                if self._is_relevant_to_question(question, doc.summary):
+                print(f"   - Document: {doc.document_name} (similarity: {similarity:.2f})")
+                
+                # Always include content if it exists and is relevant
+                if doc.content and len(doc.content.strip()) > 50:
+                    if self._is_relevant_to_question(question, doc.content):
+                        # Use the most relevant part of the content
+                        content_snippet = self._extract_relevant_snippet(question, doc.content)
+                        response_parts.append(content_snippet)
+                        sources.append(f"{doc.document_name} (similarity: {similarity:.2f})")
+                    elif self._is_relevant_to_question(question, doc.summary):
+                        response_parts.append(doc.summary)
+                        sources.append(f"{doc.document_name} - Summary (similarity: {similarity:.2f})")
+                elif doc.summary and len(doc.summary.strip()) > 20:
                     response_parts.append(doc.summary)
-                    sources.append(f"{doc.document_name} (similarity: {similarity:.2f})")
-                elif self._is_relevant_to_question(question, doc.content[:500]):
-                    # Use first 500 chars if summary not relevant
-                    response_parts.append(doc.content[:500] + "...")
-                    sources.append(f"{doc.document_name} (similarity: {similarity:.2f})")
+                    sources.append(f"{doc.document_name} - Summary (similarity: {similarity:.2f})")
             
             if not response_parts:
+                print("No relevant content found in search results")
                 return None
             
             # Combine responses
@@ -71,13 +95,16 @@ class EnhancedQueryEngine:
                 "## Answer\n\n"
                 + combined_response
                 + "\n\n## Sources\n\n- "
-                + "\n- ".join(sources)
+                + "\n- ".join(sources[:3])
             )
             
+            print(f"Generated response with {len(formatted_response)} characters")
             return formatted_response
             
         except Exception as e:
             print(f"Error in query_index: {e}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
             return None
     
     def _is_relevant_to_question(self, question: str, text: str) -> bool:
@@ -89,9 +116,42 @@ class EnhancedQueryEngine:
         
         # Calculate word overlap
         overlap = len(question_words.intersection(text_words))
-        relevance_threshold = max(1, len(question_words) * 0.2)  # At least 20% overlap
+        relevance_threshold = max(1, len(question_words) * 0.15)  # At least 15% overlap
         
         return overlap >= relevance_threshold
+    
+    def _extract_relevant_snippet(self, question: str, content: str, max_length: int = 800) -> str:
+        """
+        Extract the most relevant snippet from content based on question
+        """
+        question_words = set(word.lower() for word in question.split() if len(word) > 3)
+        
+        # Split content into sentences
+        sentences = content.replace('\n', ' ').split('. ')
+        
+        # Score sentences based on question word overlap
+        scored_sentences = []
+        for sentence in sentences:
+            sentence_words = set(word.lower() for word in sentence.split())
+            overlap = len(question_words.intersection(sentence_words))
+            if overlap > 0:
+                scored_sentences.append((overlap, sentence.strip()))
+        
+        if not scored_sentences:
+            # If no overlap found, return beginning of content
+            return content[:max_length] + ("..." if len(content) > max_length else "")
+        
+        # Sort by relevance and combine top sentences
+        scored_sentences.sort(key=lambda x: x[0], reverse=True)
+        
+        snippet = ""
+        for score, sentence in scored_sentences[:3]:  # Top 3 sentences
+            if len(snippet) + len(sentence) < max_length:
+                snippet += sentence + ". "
+            else:
+                break
+        
+        return snippet.strip() or content[:max_length] + ("..." if len(content) > max_length else "")
     
     async def search_documents_by_content(
         self, 

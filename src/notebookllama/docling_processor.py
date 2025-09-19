@@ -20,8 +20,7 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from llama_index.core import Document
 from llama_index.core.schema import TextNode
 from llama_index.core.llms import ChatMessage
-from llama_index.llms.openai import OpenAIResponses
-from llama_index.core.llms.structured_llm import StructuredLLM
+from llama_index.llms.openai import OpenAI
 
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -64,7 +63,7 @@ class DoclingProcessor:
         
         # Initialize structured LLM for notebook generation
         if os.getenv("OPENAI_API_KEY"):
-            llm = OpenAIResponses(
+            llm = OpenAI(
                 model="gpt-4o", 
                 api_key=os.getenv("OPENAI_API_KEY")
             )

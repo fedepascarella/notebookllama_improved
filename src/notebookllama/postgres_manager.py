@@ -32,10 +32,10 @@ from llama_index.core import Document, VectorStoreIndex, Settings
 from llama_index.core.schema import TextNode, NodeWithScore
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
-from llama_index.vector_stores.postgres import PGVectorStore
+from llama_index.vector_stores.postgres.base import PGVectorStore 
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import CitationQueryEngine
-from llama_index.core.response.schema import Response
+from llama_index.core.response import Response
 
 from dotenv import load_dotenv
 
@@ -57,7 +57,7 @@ class DocumentRecord(Base):
     bullet_points = Column(Text, nullable=False)
     
     # Enhanced fields
-    metadata = Column(JSON, nullable=True)
+    doc_metadata = Column(JSON, nullable=True)
     extracted_tables = Column(JSON, nullable=True)
     extracted_images = Column(JSON, nullable=True)
     
@@ -88,7 +88,7 @@ class DocumentChunk(Base):
     embedding = Column(Vector(1536), nullable=True)
     
     # Metadata
-    metadata = Column(JSON, nullable=True)
+    doc_metadata = Column(JSON, nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -104,7 +104,7 @@ class EnhancedDocument:
     q_and_a: str
     mindmap: str
     bullet_points: str
-    metadata: Optional[Dict[str, Any]] = None
+    doc_metadata: Optional[Dict[str, Any]] = None
     extracted_tables: Optional[List[Dict]] = None
     extracted_images: Optional[List[str]] = None
     created_at: Optional[datetime] = None
@@ -165,6 +165,7 @@ class PostgreSQLDocumentManager:
         """Initialize PGVector store for vector search"""
         try:
             if self.embedding_model:
+                print("Initializing vector store...")
                 self.vector_store = PGVectorStore.from_params(
                     database=os.getenv('pgql_db', 'postgres'),
                     host=os.getenv('pgql_host', 'localhost'),
@@ -183,11 +184,16 @@ class PostgreSQLDocumentManager:
                 self.vector_index = VectorStoreIndex.from_vector_store(
                     vector_store=self.vector_store
                 )
+                print("Vector store initialized successfully")
             else:
+                print("No embedding model available - vector store disabled")
                 self.vector_store = None
                 self.vector_index = None
         except Exception as e:
-            print(f"Warning: Could not initialize vector store: {e}")
+            print(f"CRITICAL: Could not initialize vector store: {e}")
+            print(f"   - Check if PostgreSQL is running with pgvector extension")
+            print(f"   - Verify OpenAI API key is valid")
+            print(f"   - Confirm database connection parameters")
             self.vector_store = None
             self.vector_index = None
 
@@ -205,10 +211,14 @@ class PostgreSQLDocumentManager:
             
             if self.embedding_model:
                 try:
-                    content_embedding = await self.embedding_model.aget_text_embedding(document.content)
-                    summary_embedding = await self.embedding_model.aget_text_embedding(document.summary)
+                    # Generate embeddings synchronously to avoid async issues
+                    content_embedding = self.embedding_model.get_text_embedding(document.content)
+                    summary_embedding = self.embedding_model.get_text_embedding(document.summary)
+                    print(f"Generated embeddings: content={len(content_embedding)}, summary={len(summary_embedding)}")
                 except Exception as e:
                     print(f"Warning: Could not generate embeddings: {e}")
+                    content_embedding = None
+                    summary_embedding = None
 
             # Create document record
             doc_record = DocumentRecord(
@@ -219,7 +229,7 @@ class PostgreSQLDocumentManager:
                 q_and_a=document.q_and_a,
                 mindmap=document.mindmap,
                 bullet_points=document.bullet_points,
-                metadata=document.metadata,
+                doc_metadata=document.doc_metadata,
                 extracted_tables=document.extracted_tables,
                 extracted_images=document.extracted_images,
                 content_embedding=content_embedding,
@@ -264,7 +274,7 @@ class PostgreSQLDocumentManager:
                 if chunk_text.strip():
                     # Generate embedding for chunk
                     try:
-                        embedding = await self.embedding_model.aget_text_embedding(chunk_text)
+                        embedding = self.embedding_model.get_text_embedding(chunk_text)
                     except Exception as e:
                         print(f"Warning: Could not generate chunk embedding: {e}")
                         embedding = None
@@ -274,7 +284,7 @@ class PostgreSQLDocumentManager:
                         chunk_text=chunk_text,
                         chunk_index=len(chunks),
                         embedding=embedding,
-                        metadata={"chunk_word_start": i, "chunk_word_end": i + chunk_size_words}
+                        doc_metadata={"chunk_word_start": i, "chunk_word_end": i + chunk_size_words}
                     )
                     chunks.append(chunk_record)
             
@@ -290,13 +300,26 @@ class PostgreSQLDocumentManager:
             return
             
         try:
-            # Create LlamaIndex documents
+            # Create LlamaIndex documents with embeddings
             doc_nodes = []
             
-            # Main content
+            # Generate embeddings for content and summary
+            content_embedding = None
+            summary_embedding = None
+            
+            if self.embedding_model:
+                try:
+                    content_embedding = self.embedding_model.get_text_embedding(document.content)
+                    summary_embedding = self.embedding_model.get_text_embedding(document.summary)
+                except Exception as e:
+                    print(f"Warning: Could not generate embeddings for vector store: {e}")
+                    return  # Can't add to vector store without embeddings
+            
+            # Main content with embedding
             content_node = TextNode(
                 text=document.content,
-                metadata={
+                embedding=content_embedding,  # Set the embedding directly
+                doc_metadata={
                     "document_id": document.id,
                     "document_name": document.document_name,
                     "type": "content",
@@ -305,10 +328,11 @@ class PostgreSQLDocumentManager:
             )
             doc_nodes.append(content_node)
             
-            # Summary as separate node
+            # Summary as separate node with embedding
             summary_node = TextNode(
                 text=document.summary,
-                metadata={
+                embedding=summary_embedding,  # Set the embedding directly
+                doc_metadata={
                     "document_id": document.id,
                     "document_name": document.document_name,
                     "type": "summary",
@@ -318,7 +342,8 @@ class PostgreSQLDocumentManager:
             doc_nodes.append(summary_node)
             
             # Add nodes to vector store
-            await self.vector_store.async_add(doc_nodes)
+            self.vector_store.add(doc_nodes)
+            print(f"Successfully added {len(doc_nodes)} nodes to vector store")
             
         except Exception as e:
             print(f"Warning: Could not add to vector store: {e}")
@@ -345,7 +370,7 @@ class PostgreSQLDocumentManager:
                     q_and_a=record.q_and_a,
                     mindmap=record.mindmap,
                     bullet_points=record.bullet_points,
-                    metadata=record.metadata,
+                    doc_metadata=record.doc_metadata,
                     extracted_tables=record.extracted_tables,
                     extracted_images=record.extracted_images,
                     created_at=record.created_at,
@@ -381,7 +406,7 @@ class PostgreSQLDocumentManager:
         session = self.get_session()
         try:
             # Generate query embedding
-            query_embedding = await self.embedding_model.aget_text_embedding(query)
+            query_embedding = self.embedding_model.get_text_embedding(query)
             
             # Search using cosine similarity
             # This is a simplified version - you might want to use pgvector operators
@@ -405,7 +430,7 @@ class PostgreSQLDocumentManager:
                             q_and_a=record.q_and_a,
                             mindmap=record.mindmap,
                             bullet_points=record.bullet_points,
-                            metadata=record.metadata,
+                            doc_metadata=record.doc_metadata,
                             extracted_tables=record.extracted_tables,
                             extracted_images=record.extracted_images,
                             created_at=record.created_at,
@@ -454,7 +479,7 @@ class PostgreSQLDocumentManager:
                     q_and_a=record.q_and_a,
                     mindmap=record.mindmap,
                     bullet_points=record.bullet_points,
-                    metadata=record.metadata,
+                    doc_metadata=record.doc_metadata,
                     extracted_tables=record.extracted_tables,
                     extracted_images=record.extracted_images,
                     created_at=record.created_at,
