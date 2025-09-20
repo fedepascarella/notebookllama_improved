@@ -19,10 +19,21 @@ from typing import Tuple
 # Add the parent directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Import enhanced modules
-from enhanced_workflow import WF, FileInputEvent, NotebookOutputEvent
-from postgres_manager import DOCUMENT_MANAGER, EnhancedDocument
-from audio import PODCAST_GEN, PodcastConfig
+# Import enhanced modules - using conditional imports for script vs module execution
+try:
+    # Try relative imports first (when run as module)
+    from .enhanced_workflow_v2 import EnhancedWorkflowV2, create_enhanced_workflow_v2, run_enhanced_workflow_v2
+    from .postgres_manager import DOCUMENT_MANAGER, EnhancedDocument
+    from .audio import PODCAST_GEN, PodcastConfig
+    from .mcp_ui import render_mcp_sidebar, is_mcp_enabled
+    from .mcp_enhanced_workflow_v2 import create_mcp_enhanced_workflow_v2, run_mcp_enhanced_workflow_v2
+except ImportError:
+    # Fall back to absolute imports (when run as script via streamlit)
+    from notebookllama.enhanced_workflow_v2 import EnhancedWorkflowV2, create_enhanced_workflow_v2, run_enhanced_workflow_v2
+    from notebookllama.postgres_manager import DOCUMENT_MANAGER, EnhancedDocument
+    from notebookllama.audio import PODCAST_GEN, PodcastConfig
+    from notebookllama.mcp_ui import render_mcp_sidebar, is_mcp_enabled
+    from notebookllama.mcp_enhanced_workflow_v2 import create_mcp_enhanced_workflow_v2, run_mcp_enhanced_workflow_v2
 # Temporarily disabled OpenTelemetry instrumentation
 # from instrumentation import OtelTracesSqlEngine
 # from llama_index.observability.otel import LlamaIndexOpenTelemetry
@@ -70,16 +81,20 @@ async def run_enhanced_workflow(
     try:
         st_time = int(time.time() * 1000000)
         
-        # Run enhanced workflow
-        workflow = WF()
-        # Create a StartEvent with file information attached
-        from llama_index.core.workflow.events import StartEvent
-        start_event = StartEvent()
-        # Attach file information to the StartEvent
-        start_event.file_path = temp_path
-        start_event.content = ""
-        start_event.file_type = "pdf"
-        result = await workflow.run(start_event=start_event)
+        # Run enhanced workflow v2 (with MCP integration if enabled)
+        if is_mcp_enabled():
+            # Use MCP-enhanced workflow v2
+            result = await run_mcp_enhanced_workflow_v2(
+                file_path=temp_path,
+                document_title=document_title,
+                enable_mcp=True
+            )
+        else:
+            # Use standard workflow v2
+            result = await run_enhanced_workflow_v2(
+                file_path=temp_path,
+                document_title=document_title
+            )
 
         # Handle dict result from workflow
         if isinstance(result, dict):
@@ -471,6 +486,10 @@ st.sidebar.markdown("### ✨ **What's New**")
 st.sidebar.success("🔥 **Docling Processing**: Advanced PDF parsing with AI models")
 st.sidebar.success("🐘 **PostgreSQL Storage**: Vector search and enhanced querying")
 st.sidebar.success("🔗 **Custom Chat API**: Connect to external AI services")
+st.sidebar.success("🔌 **MCP Integration**: Model Context Protocol server support")
+
+# Add MCP management sidebar
+render_mcp_sidebar()
 
 st.markdown("---")
 st.markdown("## 🦙 NotebookLlama Enhanced - Home")
@@ -539,7 +558,7 @@ if file_input is not None:
         results = st.session_state.enhanced_workflow_results
 
         # Create tabs for better organization
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Summary", "🎯 Highlights", "❓ FAQ", "🗺️ Mind Map", "💬 Chat"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Summary", "🎯 Highlights", "❓ FAQ", "🗺️ Mind Map", "💬 Chat", "🔌 MCP"])
         
         with tab1:
             st.markdown("## 📋 Document Summary")
@@ -686,6 +705,15 @@ if file_input is not None:
                 # Add to chat history
                 st.session_state.chat_history.append((user_question, answer))
                 st.rerun()
+
+        with tab6:
+            # MCP Management Tab
+            try:
+                from .mcp_ui_simple import render_simple_mcp_interface
+            except ImportError:
+                from notebookllama.mcp_ui_simple import render_simple_mcp_interface
+
+            render_simple_mcp_interface()
 
         # Podcast Generation Section
         st.markdown("---")

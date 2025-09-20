@@ -1,0 +1,33 @@
+{
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\Taligent\\POCS\\notebookllama_improved"],
+      "enabled": true,
+      "description": "File system operations and management",
+      "capabilities": ["read_file", "write_file", "list_directory", "search_files"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "enabled": true,
+      "description": "Knowledge graph and memory management",
+      "capabilities": ["create_entities", "create_relations", "search_nodes"]
+    },
+    "postgres": {
+      "command": "npx",
+      "args": [
+        "-y", "enhanced-postgres-mcp-server",
+        "postgresql://postgres:admin@localhost:5432/notebookllama_enhanced"
+      ],
+      "enabled": false,
+      "description": "PostgreSQL database operations",
+      "capabilities": ["query", "insert", "update", "delete"]
+    }
+  },
+  "global_settings": {
+    "timeout": 30,
+    "retry_attempts": 3,
+    "log_level": "INFO"
+  }
+}

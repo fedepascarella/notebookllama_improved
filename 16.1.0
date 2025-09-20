@@ -1,5 +1,0 @@
-Collecting pyarrow
-  Using cached pyarrow-21.0.0-cp311-cp311-win_amd64.whl.metadata (3.4 kB)
-Using cached pyarrow-21.0.0-cp311-cp311-win_amd64.whl (26.2 MB)
-Installing collected packages: pyarrow
-Successfully installed pyarrow-21.0.0
